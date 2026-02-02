@@ -1,0 +1,6 @@
+# Core dependencies
+numpy
+pandas
+streamlit
+plotly
+statsmodels
