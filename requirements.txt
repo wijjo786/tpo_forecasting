@@ -1,6 +1,7 @@
-# Core dependencies
 numpy
 pandas
 streamlit
 plotly
 statsmodels
+altair
+typing-extensions
