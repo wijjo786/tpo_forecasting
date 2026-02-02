@@ -1,8 +1,28 @@
-numpy
-pandas
+
+
 streamlit>=1.39.0
-plotly
-statsmodels
+
+
 altair==4.2.2
 typing-extensions
+
+
+
+# Core Data Science Libraries
+numpy
+pandas
+scipy
+
+# Streamlit and Visualization
+
+plotly
+
+# Statistical and Econometric Models
+statsmodels
+
+# Machine Learning
 scikit-learn
+
+# Additional utilities (if needed)
+openpyxl # For Excel file handling
+xlrd      # For older Excel formats
