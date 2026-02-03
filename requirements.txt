@@ -26,3 +26,4 @@ scikit-learn
 # Additional utilities (if needed)
 openpyxl # For Excel file handling
 xlrd      # For older Excel formats
+matplotlib
