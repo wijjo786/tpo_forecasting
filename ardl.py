@@ -1519,7 +1519,89 @@ div.stDataFrame > div::-webkit-scrollbar-thumb:hover {
 
 
 
+# Add this near the top after imports (around line 50)
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PERFORMANCE OPTIMIZATION - CACHING LAYER
+# ═══════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False, ttl=3600)  # Cache for 1 hour
+def cached_build_future_exog(
+    df_hist_json: str,  # Pass JSON instead of DataFrame for hashability
+    horizon: int,
+    spec_x_tuple: tuple,  # Convert list to tuple for hashing
+    **kwargs
+) -> str:  # Return JSON instead of DataFrame
+    """Cached version of build_future_exog"""
+    df_hist = pd.read_json(df_hist_json)
+    df_hist.index = pd.PeriodIndex(df_hist.index, freq='Y')
+    result = build_future_exog(df_hist, horizon, list(spec_x_tuple), **kwargs)
+    return result.to_json()
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=20)
+def cached_forecast_single_category(
+    model_kind: str,
+    head: str,
+    horizon: int,
+    exog_params_json: str,  # JSON string of parameters
+    n_sims: int = 500
+):
+    """Cache individual category forecasts to avoid recalculation"""
+    # Parse parameters
+    exog_params = json.loads(exog_params_json)
+    
+    # Load data
+    bundle, _, df_hist = load_assets()
+    head_bundle = bundle["models"][head]
+    spec = head_bundle["spec"]
+    
+    # Build exog
+    exog_future_json = cached_build_future_exog(
+        df_hist.to_json(),
+        horizon,
+        tuple(spec["x"]),
+        **exog_params
+    )
+    
+    # Get forecast
+    return get_cached_forecast(model_kind, head, horizon, exog_future_json, n_sims)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def cached_forecast_total_fast(
+    horizon: int,
+    exog_params_json: str,
+    n_sims: int = 500
+):
+    """Cached total forecast using best models"""
+    exog_params = json.loads(exog_params_json)
+    bundle, meta, df_hist = load_assets()
+    perf = perf_table(meta)
+    
+    # Get first head just for year index
+    first_head = list(TAX_LABELS.keys())[0]
+    hb = bundle["models"][first_head]
+    sp = hb["spec"]
+    ex_f_json = cached_build_future_exog(
+        df_hist.to_json(),
+        horizon,
+        tuple(sp["x"]),
+        **exog_params
+    )
+    ex_f_template = pd.read_json(ex_f_json)
+    ex_f_template.index = pd.PeriodIndex(ex_f_template.index, freq='Y')
+    years = ex_f_template.index
+    
+    total = pd.DataFrame(0.0, index=years, columns=["yhat", "lo80", "hi80", "lo95", "hi95"])
+    
+    for h in TAX_LABELS.keys():
+        best = best_model_by_mape(perf, h)
+        forecast_json = json.dumps(exog_params)
+        s = cached_forecast_single_category(best, h, horizon, forecast_json, n_sims)
+        total = total + s
+    
+    return total
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SIDEBAR LOGO INTEGRATION - PYTHON IMPLEMENTATION
@@ -2033,9 +2115,9 @@ with col2:
 
 n_sims = st.sidebar.select_slider(
     "Uncertainty Simulations",
-    options=[100, 500, 1000],
-    value=500,
-    help="Higher values = better confidence intervals (slower computation)"
+    options=[100, 250, 500, 1000],
+    value=250,  # Lower default for faster initial load
+    help="Higher values = better confidence intervals (slower computation). Use 100-250 for quick exploration, 500+ for final results."
 )
 
 use_univariate = st.sidebar.checkbox(
@@ -2185,7 +2267,7 @@ with col2:
     if st.button("📤 Export", use_container_width=True, help="Export forecast results"):
         st.toast("Export functionality - check Data Preview tab", icon="💾")
 
-# ═══════════════════════════════════════════════════════════════════════════
+## ═══════════════════════════════════════════════════════════════════════════
 # PREPARE FORECAST
 # ═══════════════════════════════════════════════════════════════════════════
 head_bundle = bundle["models"][head]
@@ -2193,6 +2275,7 @@ spec = head_bundle["spec"]
 y_name = spec["y"]
 x_cols = spec["x"]
 
+# First, define exog_params (MUST come before loading state management)
 exog_params = {
     "gdp_nonagr_g": gdp_nonagr_g,
     "lsm_g": lsm_g,
@@ -2206,13 +2289,63 @@ exog_params = {
     "use_univariate": use_univariate,
 }
 
-exog_future = build_future_exog(df_hist, horizon, x_cols, **exog_params)
-exog_json = exog_future.to_json()
+# Serialised once here so every downstream block (including tab2) can use it
+exog_params_json = json.dumps(exog_params)
+# ═══════════════════════════════════════════════════════════════════════════
+# LOADING STATE MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
+# Show loading indicator during calculations
+if 'last_params' not in st.session_state:
+    st.session_state.last_params = None
 
-fore = get_cached_forecast(chosen, head, horizon, exog_json, n_sims=n_sims)
+current_params = (head, model_choice, horizon, n_sims, json.dumps(exog_params, sort_keys=True))
+
+if st.session_state.last_params != current_params:
+    with st.spinner('🔄 Recalculating forecasts with new parameters...'):
+        st.session_state.last_params = current_params
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SESSION STATE CACHING FOR EXPENSIVE COMPUTATIONS
+# ═══════════════════════════════════════════════════════════════════════════
+# Initialize session state for caching expensive computations
+if 'computed_forecasts' not in st.session_state:
+    st.session_state.computed_forecasts = {}
+
+# Create a hash of current parameters for caching
+param_hash = f"{head}_{chosen}_{horizon}_{n_sims}_{hash(json.dumps(exog_params, sort_keys=True))}"
+
+# Check if we've already computed this exact configuration
+if param_hash in st.session_state.computed_forecasts:
+    # Retrieve from cache
+    fore, total_fore, exog_future = st.session_state.computed_forecasts[param_hash]
+else:
+    # Compute fresh - use cached functions
+    exog_params_json = json.dumps(exog_params)
+    fore = cached_forecast_single_category(chosen, head, horizon, exog_params_json, n_sims)
+    
+    # Get exog for display purposes only
+    exog_future_json = cached_build_future_exog(
+        df_hist.to_json(),
+        horizon,
+        tuple(x_cols),
+        **exog_params
+    )
+    exog_future = pd.read_json(exog_future_json)
+    exog_future.index = pd.PeriodIndex(exog_future.index, freq='Y')
+    
+    # Calculate total forecast
+    total_fore = cached_forecast_total_fast(horizon, exog_params_json, n_sims)
+    
+    # Store in session state cache (keep only last 5 configs to manage memory)
+    if len(st.session_state.computed_forecasts) > 5:
+        # Remove oldest entry
+        oldest_key = list(st.session_state.computed_forecasts.keys())[0]
+        del st.session_state.computed_forecasts[oldest_key]
+    
+    st.session_state.computed_forecasts[param_hash] = (fore, total_fore, exog_future)
+
+# Calculate historical data
 hist_level = np.exp(df_hist[y_name])
-
-total_fore = forecast_total(horizon, bundle, exog_params, n_sims=n_sims)
 total_hist = sum(np.exp(df_hist[f"log_{h}"]) for h in TAX_LABELS.keys())
 
 # Calculate metrics
@@ -2220,7 +2353,6 @@ total_hist_latest = total_hist.iloc[-1] / 1000
 total_fore_last = total_fore["yhat"].iloc[-1] / 1000
 growth_pct = ((total_fore_last * 1000) / (total_hist_latest * 1000) - 1) * 100
 avg_annual_growth = (((total_fore_last * 1000) / (total_hist_latest * 1000)) ** (1/horizon) - 1) * 100
-
 # ═══════════════════════════════════════════════════════════════════════════
 # HEADER
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2330,13 +2462,14 @@ with tab1:
     # Total Revenue
     st.markdown("""
     <div class="content-section">
-        <div class="section-header">
+        <div class="section-header" style="margin-bottom: 0px; padding-bottom: 0px;">
             <div>
                 <div class="section-title">Aggregate Revenue Projection</div>
                 <div class="section-subtitle">Sum of all tax heads using best models</div>
             </div>
             <div class="section-badge">🏆 Ensemble Forecast</div>
         </div>
+    </div>
     """, unsafe_allow_html=True)
     
     fig_total = go.Figure()
@@ -2506,7 +2639,7 @@ with tab2:
 div[data-testid="stMetric"] {
     background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%);
     border: 1px solid #E5E7EB;
-    border-radius: 10px;  /* Slightly larger radius to match cards */
+    border-radius: 10px;
     padding: 0.75rem 0.875rem;
     min-height: 75px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.04);
@@ -2517,7 +2650,6 @@ div[data-testid="stMetric"]:hover {
     transform: translateY(-2px);
     border-color: #D1D8DE;
 }
-/* Keep all your existing label/value styles below */
 div[data-testid="stMetric"] label {
     font-size: 0.68rem !important;
     font-weight: 600 !important;
@@ -2539,12 +2671,23 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
 </style>
 """, unsafe_allow_html=True)
     
+    # Initialize progress bar
+    progress_bar = st.progress(0, text="Loading category forecasts...")
+    
     # Create a 2-column grid for all tax categories
     num_cols = 2
-    for i in range(0, len(TAX_LABELS), num_cols):
+    total_categories = len(TAX_LABELS)
+    
+    for i in range(0, total_categories, num_cols):
+        # Update progress bar
+        progress_bar.progress(
+            min(1.0, (i + num_cols) / total_categories),
+            text=f"Loading {min(i + num_cols, total_categories)}/{total_categories} categories..."
+        )
+        
         cols = st.columns(num_cols, gap="medium")
         for j in range(num_cols):
-            if i + j < len(TAX_LABELS):
+            if i + j < total_categories:
                 cat_head = list(TAX_LABELS.keys())[i + j]
                 with cols[j]:
                     # Get forecast for this category using the selected model
@@ -2552,9 +2695,8 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
                     cat_spec = cat_bundle["spec"]
                     cat_y_name = cat_spec["y"]
                     
-                    # Build exog for this category
-                    cat_exog_future = build_future_exog(df_hist, horizon, cat_spec["x"], **exog_params)
-                    cat_fore = get_cached_forecast(chosen, cat_head, horizon, cat_exog_future.to_json(), n_sims=n_sims)
+                    # Use cached forecast function
+                    cat_fore = cached_forecast_single_category(chosen, cat_head, horizon, exog_params_json, n_sims)
                     cat_hist_level = np.exp(df_hist[cat_y_name])
                     
                     # Calculate metrics
@@ -2702,8 +2844,10 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
                     # Small separator
                     st.markdown("<div style='margin: 1.5rem 0; border-bottom: 1px solid #E5E7EB;'></div>", unsafe_allow_html=True)
     
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Clear progress bar when done
+    progress_bar.empty()
     
+    st.markdown('</div>', unsafe_allow_html=True)
 with tab3:
     st.markdown("""
     <div class="content-section">
