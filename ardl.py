@@ -205,7 +205,7 @@ section[data-testid="stSidebar"]::before {
 }
 
 section[data-testid="stSidebar"] > div:first-child {
-    padding-top: 1.5rem;
+    padding-top: 0rem;
     padding-bottom: 2rem;
     position: relative;
     z-index: 2;
@@ -213,9 +213,9 @@ section[data-testid="stSidebar"] > div:first-child {
 
 /* Sidebar Branding */
 .sidebar-brand {
-    padding: 0 var(--space-6) var(--space-5);
+    padding: 0 var(--space-6) var(--space-3);
     border-bottom: 2px solid rgba(255, 255, 255, 0.4);
-    margin-bottom: var(--space-5);
+    margin-bottom: var(--space-4);
     position: relative;
     z-index: 2;
 }
@@ -425,7 +425,7 @@ section[data-testid="stSidebar"] .uploadedFile:hover {
     border: 1px solid var(--border-light);
     border-radius: var(--radius-xl);
     padding: 2rem 2.5rem;
-    margin: 3rem 0 2rem;
+    margin: -1rem 0 0rem;  /* Changed bottom from 2rem to 1rem */
     box-shadow: var(--shadow-md);
     position: relative;
     overflow: hidden;
@@ -498,6 +498,7 @@ section[data-testid="stSidebar"] .uploadedFile:hover {
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     gap: 1.5rem;
     margin-bottom: 1.5rem;
+    margin-top: 0rem; 
 }
 
 .kpi-card {
